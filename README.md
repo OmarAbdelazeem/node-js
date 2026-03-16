@@ -61,23 +61,37 @@ Production-lean Node.js + Express + TypeScript backend for **Paymob Accept** car
 
 Paymob must reach your webhook over HTTPS. **Recommended: ngrok** (no interstitial, so Paymob callbacks work).
 
-### Option A: ngrok (recommended for webhooks)
+### Option A: ngrok from the app (Node.js SDK, recommended if CLI auth fails)
+
+The backend can create the ngrok tunnel itself using the **@ngrok/ngrok** package. This often works when the ngrok CLI fails with "failed to send authentication request" or CRL timeouts.
+
+1. Get your **authtoken** from [dashboard → Your Authtoken](https://dashboard.ngrok.com/get-started/your-authtoken) (copy it; avoid typing to prevent 0/O and 1/l typos).
+2. In `.env`, add: `NGROK_AUTHTOKEN=your_token_here`
+3. Start the server: `npm run dev`
+4. On startup you’ll see `[ngrok] Tunnel is up`, **Public URL**, and **Webhook URL**. Copy the Webhook URL.
+5. In **Paymob** → Developers → Payment Integrations → Edit (integration 5547386) → set both callback URLs to that webhook URL → Submit.
+
+Only one terminal is needed; the server and tunnel run together.
+
+### Option B: ngrok CLI (separate terminal)
 
 1. **Install:** `brew install ngrok`
 2. **Sign up** at [ngrok.com](https://ngrok.com) and get your **authtoken** from [dashboard → Your Authtoken](https://dashboard.ngrok.com/get-started/your-authtoken).
 3. **Add authtoken:** `ngrok config add-authtoken YOUR_TOKEN`
 4. **Terminal 1** – start the server: `npm run dev`
 5. **Terminal 2** – start tunnel: `ngrok http 3000`
-6. Copy the **HTTPS Forwarding** URL (e.g. `https://xxxx.ngrok-free.app`). Your webhook URL is: `https://xxxx.ngrok-free.app/payments/paymob/webhook`
-7. In **Paymob** → Developers → Payment Integrations → Edit (integration 5547386) → set both callback URLs to that webhook URL → Submit.
+6. Copy the **HTTPS Forwarding** URL. Your webhook URL is: `https://xxxx.ngrok-free.app/payments/paymob/webhook`
+7. Set that webhook URL in Paymob as above.
 
-### Option B: localtunnel (`npm run tunnel`)
+**If ngrok shows "reconnecting (failed to send authentication request)":** Use **Option A** (NGROK_AUTHTOKEN in .env) instead, or fix the token (copy from dashboard; watch for 0 vs O, 1 vs l).
+
+### Option C: localtunnel (`npm run tunnel`)
 
 1. **Terminal 1:** `npm run dev`
 2. **Terminal 2:** `npm run tunnel` — copy the Webhook URL printed.
 3. Set that URL in Paymob as above.
 
-**Note:** Localtunnel may show an interstitial or block server requests; if Paymob callbacks don’t reach your backend (order stays PENDING), use ngrok instead.
+**Note:** Localtunnel may show an interstitial or block server requests; if Paymob callbacks don’t reach your backend (order stays PENDING), use ngrok (Option A or B) instead.
 
 ## API
 
@@ -260,6 +274,7 @@ Replace `order_id` with the real `paymob_order_id` from the session response if 
 | DATABASE_PATH | If USE_DB=sqlite | Path to SQLite file (e.g. `./data/paymob.db`) |
 | DATABASE_URL | If USE_DB=true | Postgres connection string |
 | DEV_BYPASS_HMAC | No | Set to `true` to skip webhook HMAC (demo only) |
+| NGROK_AUTHTOKEN | No | ngrok authtoken; when set, server creates a public tunnel on startup (see Option A above) |
 
 Optional auth (if your dashboard uses username/password instead of api_key):  
 `PAYMOB_USERNAME`, `PAYMOB_PASSWORD`.

@@ -61,6 +61,30 @@ app.use((err: unknown, _req: express.Request, res: express.Response, _next: expr
   res.status(500).json({ error: "Internal server error" });
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`Server listening on port ${PORT}`);
+
+  // Optional: create ngrok tunnel when NGROK_AUTHTOKEN is set (avoids CLI auth issues)
+  const authtoken = process.env.NGROK_AUTHTOKEN;
+  if (authtoken && authtoken.trim()) {
+    try {
+      const ngrok = await import("@ngrok/ngrok");
+      const listener = await ngrok.forward({
+        addr: PORT,
+        authtoken: authtoken.trim(),
+      });
+      const publicUrl = listener.url();
+      if (publicUrl) {
+        const webhookUrl = `${publicUrl.replace(/\/$/, "")}/payments/paymob/webhook`;
+        console.log("");
+        console.log("[ngrok] Tunnel is up");
+        console.log("[ngrok] Public URL:   ", publicUrl);
+        console.log("[ngrok] Webhook URL: ", webhookUrl);
+        console.log("[ngrok] Set the Webhook URL in Paymob dashboard.");
+        console.log("");
+      }
+    } catch (err) {
+      console.warn("[ngrok] Tunnel failed (server still running on localhost):", err instanceof Error ? err.message : err);
+    }
+  }
 });
