@@ -1,6 +1,6 @@
 # Paymob Card Payments Demo Backend
 
-Production-lean Node.js + Express + TypeScript backend for **Paymob Accept** card payments, designed for mobile apps using the **Paymob Mobile SDK** (no WebView). The backend holds all Paymob secrets and exposes a session endpoint plus webhook handling.
+Production-lean Node.js + Express + TypeScript backend for **Paymob** card payments, designed for mobile apps using the **Paymob Mobile SDK** (no WebView). The backend uses Paymob’s **Create Intention API** to issue a **client_secret** (and optional **public_key**) for the SDK; it holds the secret key and exposes a session endpoint plus webhook handling.
 
 ## Requirements
 
@@ -27,7 +27,7 @@ Production-lean Node.js + Express + TypeScript backend for **Paymob Accept** car
    Edit `.env` and set at least:
 
    - `BASE_URL` – your public base URL (e.g. ngrok URL for local testing)
-   - `PAYMOB_API_KEY` – from Paymob dashboard
+   - `PAYMOB_SECRET_KEY` – from Paymob dashboard (Account Info → Secret Key); used for Create Intention API
    - `PAYMOB_HMAC_SECRET` – for webhook signature verification
    - `PAYMOB_INTEGRATION_ID_CARD` – card integration ID
 
@@ -37,7 +37,7 @@ Production-lean Node.js + Express + TypeScript backend for **Paymob Accept** car
    npm run dev
    ```
 
-   Server runs at `http://localhost:3000` (or your `PORT`).
+   Server runs at `http://localhost:3000` (or your `PORT`). Interactive API docs: **http://localhost:3000/api-docs** (Swagger UI).
 
 4. **Optional: Postgres**
 
@@ -68,8 +68,7 @@ The backend can create the ngrok tunnel itself using the **@ngrok/ngrok** packag
 1. Get your **authtoken** from [dashboard → Your Authtoken](https://dashboard.ngrok.com/get-started/your-authtoken) (copy it; avoid typing to prevent 0/O and 1/l typos).
 2. In `.env`, add: `NGROK_AUTHTOKEN=your_token_here`
 3. Start the server: `npm run dev`
-4. On startup you’ll see `[ngrok] Tunnel is up`, **Public URL**, and **Webhook URL**. Copy the Webhook URL.
-5. In **Paymob** → Developers → Payment Integrations → Edit (integration 5547386) → set both callback URLs to that webhook URL → Submit.
+4. On startup you’ll see `[ngrok] Tunnel is up`, **Webhook URL**, and **Callback URL**. In **Paymob** → Integration Callbacks: set **Transaction processed callback** to the Webhook URL, and **Transaction response callback** to the Callback URL.
 
 Only one terminal is needed; the server and tunnel run together.
 
@@ -95,9 +94,11 @@ Only one terminal is needed; the server and tunnel run together.
 
 ## API
 
+**Interactive docs:** [Swagger UI](http://localhost:3000/api-docs) when the server is running.
+
 ### POST /payments/paymob/session
 
-Creates a Paymob order and payment key. The mobile app calls this, then starts the Paymob SDK with the returned `payment_key` only (no WebView).
+Creates a payment intention via Paymob’s **Create Intention API** and returns **client_secret** (and optionally **public_key**) for the Mobile SDK. The app starts the Paymob SDK with `clientSecret` and `publicKey`; no card data is sent from the app. For **pay with saved card**, send **saved_card_uuid** in the body and **X-User-Id** in the header; the backend passes the card token in the intention.
 
 **Request (JSON):**
 
@@ -132,14 +133,22 @@ Creates a Paymob order and payment key. The mobile app calls this, then starts t
 {
   "merchant_order_id": "order-123",
   "paymob_order_id": 123456,
-  "payment_key": "ZXlK...",
-  "status": "PENDING"
+  "client_secret": "intention_client_secret_from_paymob",
+  "payment_key": "intention_client_secret_from_paymob",
+  "status": "PENDING",
+  "public_key": "optional_if_set_in_env"
 }
 ```
 
-### POST /payments/paymob/webhook
+The app uses **client_secret** (or **payment_key**, same value) as the SDK’s `clientSecret`. If **public_key** is omitted, the app uses its build-time key.
 
-Paymob callback. Verifies HMAC (query `hmac` or header `hmac`), then updates the stored payment status. Returns 200 quickly. For local testing you can set `DEV_BYPASS_HMAC=true` (do not use in production).
+### POST /payments/paymob/webhook (Transaction processed callback)
+
+Server-to-server callback from Paymob. Verifies HMAC (query `hmac` or header `hmac`), then updates the stored payment status. Set this URL as **Transaction processed callback** in Paymob Integration Callbacks. For local testing you can set `DEV_BYPASS_HMAC=true` (do not use in production).
+
+### GET /payments/paymob/callback (Transaction response callback)
+
+User redirect after payment. Paymob (or the SDK) redirects the user here with GET. Set this URL as **Transaction response callback** in Paymob. Returns an HTML page; if `PAYMENT_CALLBACK_DEEP_LINK` is set in `.env` (e.g. `myapp://payment/complete`), the page redirects back to the app and forwards query params (e.g. `merchant_order_id`, `success`) so the app can show the result or poll payment status.
 
 ### GET /orders/:merchant_order_id/payment-status
 
@@ -264,17 +273,16 @@ Replace `order_id` with the real `paymob_order_id` from the session response if 
 | Variable | Required | Description |
 |----------|----------|-------------|
 | PORT | No | Server port (default 3000) |
-| BASE_URL | Yes | Public base URL (e.g. for webhook logging) |
-| PAYMOB_API_KEY | Yes | Paymob API key |
+| BASE_URL | Yes | Public base URL (e.g. for webhook and intention notification_url) |
+| PAYMOB_SECRET_KEY | Yes | Paymob secret key (Dashboard → Account Info); used for Create Intention API |
 | PAYMOB_HMAC_SECRET | Yes | Webhook HMAC secret |
 | PAYMOB_INTEGRATION_ID_CARD | Yes | Card integration ID |
-| PAYMOB_IFRAME_ID | No | Optional iframe ID |
-| PAYMOB_API_BASE | No | Default: https://accept.paymob.com/api |
+| PAYMOB_PUBLIC_KEY | No | Public key returned in session; if omitted, app uses build-time key |
+| PAYMOB_INTENTION_BASE | No | Intention API base (default: https://accept.paymob.com for Egypt) |
+| PAYMOB_API_BASE | No | Legacy; default https://accept.paymob.com/api |
 | USE_DB | No | `sqlite` for SQLite, `true` for Postgres; omit for in-memory |
 | DATABASE_PATH | If USE_DB=sqlite | Path to SQLite file (e.g. `./data/paymob.db`) |
 | DATABASE_URL | If USE_DB=true | Postgres connection string |
 | DEV_BYPASS_HMAC | No | Set to `true` to skip webhook HMAC (demo only) |
+| PAYMENT_CALLBACK_DEEP_LINK | No | Deep link for mobile redirect (e.g. myapp://payment/complete); GET /payments/paymob/callback redirects here with query params |
 | NGROK_AUTHTOKEN | No | ngrok authtoken; when set, server creates a public tunnel on startup (see Option A above) |
-
-Optional auth (if your dashboard uses username/password instead of api_key):  
-`PAYMOB_USERNAME`, `PAYMOB_PASSWORD`.

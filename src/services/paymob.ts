@@ -1,147 +1,128 @@
 import axios, { AxiosError } from "axios";
-import type {
-  PaymobAuthResponse,
-  PaymobOrderResponse,
-  PaymobPaymentKeyResponse,
-  SessionRequest,
-} from "../types.js";
+import type { SessionRequest } from "../types.js";
 
 const PAYMOB_API_BASE =
   process.env.PAYMOB_API_BASE ?? "https://accept.paymob.com/api";
-const PAYMOB_API_KEY = process.env.PAYMOB_API_KEY!;
+const PAYMOB_INTENTION_BASE =
+  process.env.PAYMOB_INTENTION_BASE ??
+  (PAYMOB_API_BASE.replace(/\/api\/?$/, "") || "https://accept.paymob.com");
+const PAYMOB_SECRET_KEY = process.env.PAYMOB_SECRET_KEY!;
 const PAYMOB_INTEGRATION_ID_CARD = process.env.PAYMOB_INTEGRATION_ID_CARD!;
 
-function getBaseUrl(): string {
-  return PAYMOB_API_BASE.replace(/\/$/, "");
+function getIntentionBaseUrl(): string {
+  return PAYMOB_INTENTION_BASE.replace(/\/$/, "");
+}
+
+/** Paymob Create Intention API response (relevant fields). */
+export interface IntentionResponse {
+  intention_order_id?: number;
+  order_id?: number;
+  id?: number;
+  order?: number | { id?: number };
+  client_secret: string;
+}
+
+export interface CreateIntentionOptions {
+  cardTokens?: string[];
+  notificationUrl?: string;
 }
 
 /**
- * Get Paymob auth token.
- * Uses api_key; if your dashboard provides username/password, set PAYMOB_USERNAME and PAYMOB_PASSWORD and we can branch here.
+ * Create a payment intention via Paymob's Create Intention API.
+ * Used by the Mobile SDK flow (client_secret + public_key).
  */
-export async function getAuthToken(): Promise<{ token: string; merchantId?: number }> {
-  const url = `${getBaseUrl()}/auth/tokens`;
-  const body = process.env.PAYMOB_USERNAME
-    ? { username: process.env.PAYMOB_USERNAME, password: process.env.PAYMOB_PASSWORD }
-    : { api_key: PAYMOB_API_KEY };
+export async function createIntention(
+  input: SessionRequest,
+  options: CreateIntentionOptions = {}
+): Promise<{ orderId: number; clientSecret: string }> {
+  const { customer, billing } = input;
+  const url = `${getIntentionBaseUrl()}/v1/intention/`;
+  const integrationId = Number(PAYMOB_INTEGRATION_ID_CARD);
 
-  const res = await axios.post<PaymobAuthResponse>(url, body, {
-    headers: { "Content-Type": "application/json" },
+  const body: Record<string, unknown> = {
+    amount: input.amount_cents,
+    currency: input.currency,
+    payment_methods: [Number.isNaN(integrationId) ? "card" : integrationId],
+    items: [{ name: "Order", amount: input.amount_cents }],
+    billing_data: {
+      first_name: customer.first_name,
+      last_name: customer.last_name,
+      email: customer.email,
+      phone_number: customer.phone,
+      country: billing.country,
+      apartment: billing.apartment,
+      floor: billing.floor,
+      street: billing.street,
+      building: billing.building,
+      city: billing.city,
+      state: billing.state,
+      postal_code: billing.postal_code,
+    },
+    special_reference: input.merchant_order_id,
+    expiration: 3600,
+  };
+
+  if (options.notificationUrl && options.notificationUrl.trim()) {
+    body.notification_url = options.notificationUrl.trim();
+  }
+  if (options.cardTokens && options.cardTokens.length > 0) {
+    body.card_tokens = options.cardTokens;
+  }
+
+  // Debug: log request (no secrets in body)
+  console.log("[paymob] Create intention request", {
+    url,
+    body: JSON.stringify(body, null, 2),
+  });
+
+  const res = await axios.post<IntentionResponse>(url, body, {
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Token ${PAYMOB_SECRET_KEY}`,
+    },
     validateStatus: () => true,
   });
 
-  if ((res.status < 200 || res.status >= 300) || !res.data?.token) {
-    const data = res.data as unknown as { message?: string };
-    const msg = typeof data?.message === "string"
-      ? data.message
-      : `Paymob auth failed with status ${res.status}`;
+  if (res.status < 200 || res.status >= 300) {
+    const data = res.data as unknown as { detail?: string; message?: string };
+    // Debug: log full error response from Paymob
+    console.error("[paymob] Intention failed", {
+      status: res.status,
+      statusText: res.statusText,
+      responseData: res.data,
+    });
+    const msg =
+      typeof data?.detail === "string"
+        ? data.detail
+        : typeof data?.message === "string"
+          ? data.message
+          : `Paymob intention failed with status ${res.status}`;
     throw new Error(msg);
   }
 
-  const data = res.data as PaymobAuthResponse;
-  const merchantId = data.merchant_id ?? data.profile?.id;
-  return { token: data.token, merchantId };
-}
+  const data = res.data as IntentionResponse;
+  const clientSecret = data.client_secret;
+  // Paymob returns intention_order_id; fallbacks for older/different response shapes
+  const rawOrder = data.order;
+  const orderId =
+    data.intention_order_id ??
+    data.order_id ??
+    data.id ??
+    (typeof rawOrder === "number" ? rawOrder : null) ??
+    (rawOrder && typeof rawOrder === "object" && typeof (rawOrder as { id?: number }).id === "number"
+      ? (rawOrder as { id: number }).id
+      : null);
 
-/**
- * Create Paymob order. Returns order id.
- */
-export async function createOrder(
-  authToken: string,
-  merchantId: number | undefined,
-  input: SessionRequest
-): Promise<number> {
-  const url = `${getBaseUrl()}/ecommerce/orders`;
-  const body: Record<string, unknown> = {
-    delivery_needed: false,
-    amount_cents: input.amount_cents,
-    currency: input.currency,
-    merchant_order_id: input.merchant_order_id,
-    items: [],
-  };
-  if (merchantId != null) body.merchant_id = merchantId;
-
-  const res = await axios.post<PaymobOrderResponse>(url, body, {
-    headers: { "Content-Type": "application/json" },
-    params: { token: authToken },
-    validateStatus: () => true,
-  });
-
-  if (res.status !== 200 && res.status !== 201) {
-    const err = res.data as { message?: string };
-    throw new Error(err?.message ?? `Paymob order failed with status ${res.status}`);
+  if (orderId == null || typeof orderId !== "number") {
+    console.error("[paymob] Intention response missing order id. Full response:", JSON.stringify(res.data));
+    throw new Error("Paymob intention response missing order_id");
+  }
+  if (!clientSecret || typeof clientSecret !== "string") {
+    throw new Error("Paymob intention response missing client_secret");
   }
 
-  const id = (res.data as PaymobOrderResponse).id;
-  if (id == null || typeof id !== "number") {
-    throw new Error("Paymob order response missing id");
-  }
-  return id;
-}
-
-/**
- * Create payment key for card integration (mobile SDK).
- */
-export async function createPaymentKey(
-  authToken: string,
-  orderId: number,
-  input: SessionRequest
-): Promise<string> {
-  const url = `${getBaseUrl()}/acceptance/payment_keys`;
-  const { customer, billing } = input;
-  const billing_data = {
-    first_name: customer.first_name,
-    last_name: customer.last_name,
-    email: customer.email,
-    phone_number: customer.phone,
-    apartment: billing.apartment,
-    floor: billing.floor,
-    street: billing.street,
-    building: billing.building,
-    city: billing.city,
-    state: billing.state,
-    country: billing.country,
-    postal_code: billing.postal_code,
-  };
-
-  const body = {
-    amount_cents: input.amount_cents,
-    expiration: 3600,
-    order_id: orderId,
-    currency: input.currency,
-    integration_id: Number(PAYMOB_INTEGRATION_ID_CARD),
-    billing_data,
-  };
-
-  const res = await axios.post<PaymobPaymentKeyResponse>(url, body, {
-    headers: { "Content-Type": "application/json" },
-    params: { token: authToken },
-    validateStatus: () => true,
-  });
-
-  if (res.status !== 200 && res.status !== 201) {
-    const err = res.data as { message?: string };
-    throw new Error(err?.message ?? `Paymob payment_key failed with status ${res.status}`);
-  }
-
-  const token = (res.data as PaymobPaymentKeyResponse).token;
-  if (!token || typeof token !== "string") {
-    throw new Error("Paymob payment_key response missing token");
-  }
-  return token;
-}
-
-/**
- * Full flow: auth -> order -> payment_key. Returns { orderId, paymentKey }.
- */
-export async function createSession(input: SessionRequest): Promise<{
-  orderId: number;
-  paymentKey: string;
-}> {
-  const { token: authToken, merchantId } = await getAuthToken();
-  const orderId = await createOrder(authToken, merchantId, input);
-  const paymentKey = await createPaymentKey(authToken, orderId, input);
-  return { orderId, paymentKey };
+  console.log("[paymob] Intention created", { orderId, clientSecretLength: clientSecret.length });
+  return { orderId, clientSecret };
 }
 
 export function isPaymobError(err: unknown): err is AxiosError {

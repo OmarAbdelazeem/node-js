@@ -1,2 +1,4 @@
-import type { PaymentStorage } from "./types";
-export declare const memoryStorage: PaymentStorage;
+import type { PaymentStorage, SavedCardsStorage } from "./types";
+export declare const memoryStorage: PaymentStorage & {
+    savedCards: SavedCardsStorage;
+};

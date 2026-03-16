@@ -3,11 +3,12 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.memoryStorage = void 0;
 const byMerchantOrderId = new Map();
 const byPaymobOrderId = new Map();
+const byCardId = new Map();
 function ensureIndex(record) {
     byMerchantOrderId.set(record.merchant_order_id, record);
     byPaymobOrderId.set(record.paymob_order_id, record);
 }
-exports.memoryStorage = {
+const paymentStorage = {
     async create(data) {
         const now = new Date();
         const record = {
@@ -38,5 +39,54 @@ exports.memoryStorage = {
             record.raw_webhook = rawWebhook;
         ensureIndex(record);
     },
+};
+const savedCardsStorage = {
+    async createCard(userId, data) {
+        const id = crypto.randomUUID();
+        const now = new Date();
+        const card = {
+            id,
+            user_id: userId,
+            paymob_token: data.paymob_token,
+            masked_pan: data.masked_pan,
+            card_brand: data.card_brand,
+            last_four: data.last_four,
+            created_at: now,
+        };
+        byCardId.set(id, card);
+        return card;
+    },
+    async listCardsByUserId(userId) {
+        const list = [];
+        for (const card of byCardId.values()) {
+            if (card.user_id !== userId)
+                continue;
+            list.push({
+                id: card.id,
+                masked_pan: card.masked_pan,
+                card_brand: card.card_brand,
+                last_four: card.last_four,
+                created_at: card.created_at,
+            });
+        }
+        return list.sort((a, b) => b.created_at.getTime() - a.created_at.getTime());
+    },
+    async getCardByIdAndUserId(cardId, userId) {
+        const card = byCardId.get(cardId) ?? null;
+        if (!card || card.user_id !== userId)
+            return null;
+        return card;
+    },
+    async deleteCardByIdAndUserId(cardId, userId) {
+        const card = byCardId.get(cardId);
+        if (!card || card.user_id !== userId)
+            return false;
+        byCardId.delete(cardId);
+        return true;
+    },
+};
+exports.memoryStorage = {
+    ...paymentStorage,
+    savedCards: savedCardsStorage,
 };
 //# sourceMappingURL=memory.js.map

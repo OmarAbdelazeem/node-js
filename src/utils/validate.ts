@@ -26,6 +26,7 @@ export const sessionBodySchema = z.object({
   currency: z.string().min(1),
   customer: customerSchema,
   billing: billingSchema,
+  saved_card_uuid: z.string().optional(),
 });
 
 export type SessionBody = z.infer<typeof sessionBodySchema>;

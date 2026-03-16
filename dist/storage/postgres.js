@@ -16,7 +16,16 @@ function createPostgresStorage(connectionString) {
         createdAt: row.created_at,
         updatedAt: row.updated_at,
     });
-    return {
+    const rowToSavedCard = (row) => ({
+        id: row.id,
+        user_id: row.user_id,
+        paymob_token: row.paymob_token,
+        masked_pan: row.masked_pan,
+        card_brand: row.card_brand ?? undefined,
+        last_four: row.last_four ?? undefined,
+        created_at: row.created_at,
+    });
+    const paymentStorage = {
         async create(data) {
             const now = new Date();
             const result = await pool.query(`INSERT INTO payments (
@@ -58,6 +67,38 @@ function createPostgresStorage(connectionString) {
                 return; // idempotent
             await pool.query(`UPDATE payments SET status = $1, raw_webhook = COALESCE($2::jsonb, raw_webhook), updated_at = $3 WHERE merchant_order_id = $4`, [status, rawWebhook !== undefined ? JSON.stringify(rawWebhook) : null, new Date(), merchantOrderId]);
         },
+    };
+    const savedCardsStorage = {
+        async createCard(userId, data) {
+            const result = await pool.query(`INSERT INTO saved_cards (user_id, paymob_token, masked_pan, card_brand, last_four, created_at)
+         VALUES ($1, $2, $3, $4, $5, NOW())
+         RETURNING id, user_id, paymob_token, masked_pan, card_brand, last_four, created_at`, [userId, data.paymob_token, data.masked_pan, data.card_brand ?? null, data.last_four ?? null]);
+            return rowToSavedCard(result.rows[0]);
+        },
+        async listCardsByUserId(userId) {
+            const result = await pool.query(`SELECT id, masked_pan, card_brand, last_four, created_at FROM saved_cards WHERE user_id = $1 ORDER BY created_at DESC`, [userId]);
+            return result.rows.map((r) => ({
+                id: r.id,
+                masked_pan: r.masked_pan,
+                card_brand: r.card_brand ?? undefined,
+                last_four: r.last_four ?? undefined,
+                created_at: r.created_at,
+            }));
+        },
+        async getCardByIdAndUserId(cardId, userId) {
+            const result = await pool.query(`SELECT id, user_id, paymob_token, masked_pan, card_brand, last_four, created_at FROM saved_cards WHERE id = $1 AND user_id = $2`, [cardId, userId]);
+            if (result.rows.length === 0)
+                return null;
+            return rowToSavedCard(result.rows[0]);
+        },
+        async deleteCardByIdAndUserId(cardId, userId) {
+            const result = await pool.query("DELETE FROM saved_cards WHERE id = $1 AND user_id = $2", [cardId, userId]);
+            return (result.rowCount ?? 0) > 0;
+        },
+    };
+    return {
+        ...paymentStorage,
+        savedCards: savedCardsStorage,
     };
 }
 //# sourceMappingURL=postgres.js.map

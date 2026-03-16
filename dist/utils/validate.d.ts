@@ -51,6 +51,7 @@ export declare const sessionBodySchema: z.ZodObject<{
         country: string;
         postal_code: string;
     }>;
+    saved_card_uuid: z.ZodOptional<z.ZodString>;
 }, "strip", z.ZodTypeAny, {
     merchant_order_id: string;
     amount_cents: number;
@@ -72,6 +73,7 @@ export declare const sessionBodySchema: z.ZodObject<{
         country: string;
         postal_code: string;
     };
+    saved_card_uuid?: string | undefined;
 }, {
     merchant_order_id: string;
     amount_cents: number;
@@ -93,12 +95,38 @@ export declare const sessionBodySchema: z.ZodObject<{
         country: string;
         postal_code: string;
     };
+    saved_card_uuid?: string | undefined;
 }>;
 export type SessionBody = z.infer<typeof sessionBodySchema>;
 export declare function validateSessionBody(body: unknown): SessionRequest;
 export declare function validateSessionBodySafe(body: unknown): {
     success: true;
     data: SessionRequest;
+} | {
+    success: false;
+    error: z.ZodError;
+};
+/** Save card request body (paymob_token + masked_pan from Paymob SDK). */
+export declare const saveCardBodySchema: z.ZodObject<{
+    paymob_token: z.ZodString;
+    masked_pan: z.ZodString;
+    card_brand: z.ZodOptional<z.ZodString>;
+    last_four: z.ZodOptional<z.ZodString>;
+}, "strip", z.ZodTypeAny, {
+    paymob_token: string;
+    masked_pan: string;
+    card_brand?: string | undefined;
+    last_four?: string | undefined;
+}, {
+    paymob_token: string;
+    masked_pan: string;
+    card_brand?: string | undefined;
+    last_four?: string | undefined;
+}>;
+export type SaveCardBody = z.infer<typeof saveCardBodySchema>;
+export declare function validateSaveCardBodySafe(body: unknown): {
+    success: true;
+    data: SaveCardBody;
 } | {
     success: false;
     error: z.ZodError;

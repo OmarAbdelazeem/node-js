@@ -1,8 +1,10 @@
 import "dotenv/config";
 import path from "path";
 import express from "express";
+import swaggerUi, { type JsonObject } from "swagger-ui-express";
 import { paymobRoutes, webhookHandler } from "./routes/paymob";
 import { cardsRoutes } from "./routes/cards";
+import swaggerSpec from "./swagger-spec.json";
 
 const PORT = Number(process.env.PORT) || 3000;
 
@@ -21,7 +23,7 @@ function logStorageMode(): void {
 function validateEnv(): void {
   const required = [
     "BASE_URL",
-    "PAYMOB_API_KEY",
+    "PAYMOB_SECRET_KEY",
     "PAYMOB_HMAC_SECRET",
     "PAYMOB_INTEGRATION_ID_CARD",
   ];
@@ -53,6 +55,7 @@ app.post(
 );
 
 app.use(express.json());
+app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec as JsonObject));
 app.use(paymobRoutes);
 app.use("/users/me/cards", cardsRoutes);
 
@@ -75,12 +78,15 @@ app.listen(PORT, async () => {
       });
       const publicUrl = listener.url();
       if (publicUrl) {
-        const webhookUrl = `${publicUrl.replace(/\/$/, "")}/payments/paymob/webhook`;
+        const base = publicUrl.replace(/\/$/, "");
+        const webhookUrl = `${base}/payments/paymob/webhook`;
+        const callbackUrl = `${base}/payments/paymob/callback`;
         console.log("");
         console.log("[ngrok] Tunnel is up");
-        console.log("[ngrok] Public URL:   ", publicUrl);
-        console.log("[ngrok] Webhook URL: ", webhookUrl);
-        console.log("[ngrok] Set the Webhook URL in Paymob dashboard.");
+        console.log("[ngrok] Public URL:    ", publicUrl);
+        console.log("[ngrok] Webhook URL:   ", webhookUrl, "(Transaction processed callback)");
+        console.log("[ngrok] Callback URL:  ", callbackUrl, "(Transaction response callback)");
+        console.log("[ngrok] Set both URLs in Paymob Integration Callbacks.");
         console.log("");
       }
     } catch (err) {

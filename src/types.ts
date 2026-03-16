@@ -27,6 +27,8 @@ export interface SessionRequest {
   currency: string;
   customer: SessionCustomer;
   billing: SessionBilling;
+  /** When paying with a saved card; backend passes card token in Create Intention. */
+  saved_card_uuid?: string;
 }
 
 export interface SessionResponse {
@@ -34,6 +36,8 @@ export interface SessionResponse {
   paymob_order_id: number;
   payment_key: string;
   status: string;
+  client_secret: string;
+  public_key?: string;
 }
 
 export type PaymentStatus = "PENDING" | "PAID" | "FAILED";
@@ -88,10 +92,13 @@ export interface PaymobWebhookPayload {
     order?: { id?: number };
     order_id?: number;
     merchant_order_id?: string;
+    special_reference?: string;
   };
   order_id?: number;
   order?: number;
   merchant_order_id?: string;
+  special_reference?: string;
+  transactions?: Array<{ success?: boolean; pending?: boolean }>;
   [key: string]: unknown;
 }
 

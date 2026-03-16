@@ -1,7 +1,7 @@
 import { Router, Request, Response } from "express";
 import { randomUUID } from "crypto";
 import { validateSessionBodySafe } from "../utils/validate";
-import { createSession } from "../services/paymob";
+import { createIntention } from "../services/paymob";
 import { getStorage } from "../storage/index";
 import { verifyHmac, isHmacBypassEnabled } from "../utils/hmac";
 import type { PaymentStatus } from "../types";
@@ -12,8 +12,9 @@ const storage = getStorage();
 
 /**
  * POST /payments/paymob/session
- * Body: SessionRequest (merchant_order_id, amount_cents, currency, customer, billing)
- * Returns: { merchant_order_id, paymob_order_id, payment_key, status: "PENDING" }
+ * Body: SessionRequest (merchant_order_id, amount_cents, currency, customer, billing, optional saved_card_uuid).
+ * When saved_card_uuid is set, X-User-Id header is required; backend passes card token in Create Intention.
+ * Returns: merchant_order_id, paymob_order_id, client_secret, payment_key (alias), status, optional public_key.
  */
 router.post("/payments/paymob/session", async (req: Request, res: Response) => {
   const parsed = validateSessionBodySafe(req.body);
@@ -25,24 +26,57 @@ router.post("/payments/paymob/session", async (req: Request, res: Response) => {
   }
   const input = parsed.data;
 
+  let cardTokens: string[] = [];
+  if (input.saved_card_uuid && input.saved_card_uuid.trim()) {
+    const rawUserId = req.headers["x-user-id"];
+    const userId = typeof rawUserId === "string" ? rawUserId.trim() : "";
+    if (!userId) {
+      return res.status(400).json({
+        error: "X-User-Id header is required when paying with a saved card (saved_card_uuid)",
+      });
+    }
+    const card = await storage.savedCards.getCardByIdAndUserId(
+      input.saved_card_uuid.trim(),
+      userId
+    );
+    if (!card) {
+      return res.status(404).json({ error: "Saved card not found" });
+    }
+    cardTokens = [card.paymob_token];
+  }
+
+  const baseUrl = process.env.BASE_URL ?? "";
+  const notificationUrl = baseUrl.trim()
+    ? `${baseUrl.replace(/\/$/, "")}/payments/paymob/webhook`
+    : undefined;
+
   try {
-    const { orderId, paymentKey } = await createSession(input);
+    const { orderId, clientSecret } = await createIntention(input, {
+      cardTokens,
+      notificationUrl,
+    });
     await storage.create({
       merchant_order_id: input.merchant_order_id,
       paymob_order_id: orderId,
       amount_cents: input.amount_cents,
       currency: input.currency,
       status: "PENDING",
-      payment_key: paymentKey,
+      payment_key: clientSecret,
     });
 
-    return res.status(200).json({
+    const publicKey = process.env.PAYMOB_PUBLIC_KEY?.trim();
+    const payload: Record<string, unknown> = {
       merchant_order_id: input.merchant_order_id,
       paymob_order_id: orderId,
-      payment_key: paymentKey,
+      client_secret: clientSecret,
+      payment_key: clientSecret,
       status: "PENDING",
-    });
+    };
+    if (publicKey) payload.public_key = publicKey;
+
+    return res.status(200).json(payload);
   } catch (err) {
+    console.error("[paymob/session] createIntention error:", err instanceof Error ? err.message : err);
     const message = err instanceof Error ? err.message : "Payment session failed";
     return res.status(502).json({ error: message });
   }
@@ -121,28 +155,100 @@ export function webhookHandler(req: Request, res: Response): void {
 }
 
 function resolveWebhookStatus(payload: PaymobWebhookPayload): PaymentStatus {
-  const success =
+  // Legacy Accept payload
+  const legacySuccess =
     payload?.obj?.success === true ||
     payload?.obj?.is_success === true ||
     payload?.success === true;
-  const pending =
+  const legacyPending =
     payload?.obj?.pending === true || payload?.pending === true;
-  if (success && !pending) return "PAID";
-  if (pending) return "PENDING";
+  if (legacySuccess && !legacyPending) return "PAID";
+  if (legacyPending) return "PENDING";
+
+  // Intention-style: transactions array
+  const transactions = payload?.transactions as Array<{ success?: boolean; pending?: boolean }> | undefined;
+  if (Array.isArray(transactions) && transactions.length > 0) {
+    const anyPending = transactions.some((t) => t?.pending === true);
+    const anySuccess = transactions.some((t) => t?.success === true);
+    if (anyPending) return "PENDING";
+    if (anySuccess) return "PAID";
+    return "FAILED";
+  }
+
+  if (legacySuccess) return "PAID";
   return "FAILED";
 }
 
 function resolvePaymobOrderId(payload: PaymobWebhookPayload): number | null {
   const o = payload?.obj;
-  const id = o?.order?.id ?? o?.order_id ?? payload?.order_id ?? payload?.order;
+  // Intention callback may send order_id at top level
+  const id =
+    payload?.order_id ??
+    o?.order?.id ??
+    o?.order_id ??
+    payload?.order_id ??
+    payload?.order;
   if (typeof id === "number") return id;
   if (typeof id === "string") return parseInt(id, 10) || null;
   return null;
 }
 
 function resolveMerchantOrderId(payload: PaymobWebhookPayload): string | null {
-  const id = payload?.obj?.merchant_order_id ?? payload?.merchant_order_id;
+  const o = payload?.obj as Record<string, unknown> | undefined;
+  // Intention: special_reference is our merchant_order_id
+  const id =
+    payload?.merchant_order_id ??
+    payload?.special_reference ??
+    o?.merchant_order_id ??
+    (o?.special_reference as string | undefined);
   return typeof id === "string" ? id : null;
+}
+
+/**
+ * GET /payments/paymob/callback
+ * Transaction response callback for mobile redirect. Paymob redirects the user here after payment (GET).
+ * Use this URL as "Transaction response callback" in Paymob; keep "Transaction processed callback" as the webhook (POST).
+ * Optional: set PAYMENT_CALLBACK_DEEP_LINK in env (e.g. myapp://payment/complete) to redirect back to the app.
+ */
+router.get("/payments/paymob/callback", (req: Request, res: Response) => {
+  const deepLink = process.env.PAYMENT_CALLBACK_DEEP_LINK?.trim();
+  const query = req.query as Record<string, string | undefined>;
+  const params = new URLSearchParams();
+  Object.entries(query).forEach(([k, v]) => {
+    if (v != null && v !== "") params.set(k, v);
+  });
+  const queryString = params.toString();
+
+  if (deepLink) {
+    const target = queryString ? `${deepLink}${deepLink.includes("?") ? "&" : "?"}${queryString}` : deepLink;
+    const html = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Payment complete</title>
+<meta http-equiv="refresh" content="1;url=${escapeHtml(target)}">
+</head><body>
+<p>Payment complete. Redirecting to app…</p>
+<p><a href="${escapeHtml(target)}">Return to app</a></p>
+</body></html>`;
+    res.type("html").send(html);
+    return;
+  }
+
+  const html = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Payment complete</title>
+</head><body>
+<p>Payment complete. You can close this page and return to the app.</p>
+</body></html>`;
+  res.type("html").send(html);
+});
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 /**

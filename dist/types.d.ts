@@ -24,12 +24,16 @@ export interface SessionRequest {
     currency: string;
     customer: SessionCustomer;
     billing: SessionBilling;
+    /** When paying with a saved card; backend passes card token in Create Intention. */
+    saved_card_uuid?: string;
 }
 export interface SessionResponse {
     merchant_order_id: string;
     paymob_order_id: number;
     payment_key: string;
     status: string;
+    client_secret: string;
+    public_key?: string;
 }
 export type PaymentStatus = "PENDING" | "PAID" | "FAILED";
 export interface PaymentRecord {
@@ -81,11 +85,50 @@ export interface PaymobWebhookPayload {
         };
         order_id?: number;
         merchant_order_id?: string;
+        special_reference?: string;
     };
     order_id?: number;
     order?: number;
     merchant_order_id?: string;
+    special_reference?: string;
+    transactions?: Array<{
+        success?: boolean;
+        pending?: boolean;
+    }>;
     [key: string]: unknown;
+}
+/** Saved card (full record, includes token). */
+export interface SavedCard {
+    id: string;
+    user_id: string;
+    paymob_token: string;
+    masked_pan: string;
+    card_brand?: string;
+    last_four?: string;
+    created_at: Date;
+}
+/** Input for creating a saved card (from Paymob SDK after user saves card). */
+export interface CreateSavedCardData {
+    paymob_token: string;
+    masked_pan: string;
+    card_brand?: string;
+    last_four?: string;
+}
+/** Saved card list item (no token). */
+export interface SavedCardListItem {
+    id: string;
+    masked_pan: string;
+    card_brand?: string;
+    last_four?: string;
+    created_at: Date;
+}
+/** Saved card with token (for payment flow). */
+export interface SavedCardForPayment {
+    id: string;
+    paymob_token: string;
+    masked_pan: string;
+    card_brand?: string;
+    last_four?: string;
 }
 export interface EnvConfig {
     PORT: number;

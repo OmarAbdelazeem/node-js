@@ -1,0 +1,306 @@
+{
+    "openapi": "3.0.3",
+    "info": {
+        "title": "Paymob Card Payments Demo API",
+        "description": "Backend for Paymob card payments via Mobile SDK. Create payment sessions, check status, and manage saved cards.",
+        "version": "1.0.0"
+    },
+    "servers": [
+        { "url": "http://localhost:3000", "description": "Local" }
+    ],
+    "paths": {
+        "/health": {
+            "get": {
+                "summary": "Health check",
+                "tags": ["Health"],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "content": {
+                            "application/json": {
+                                "schema": { "type": "object", "properties": { "status": { "type": "string", "example": "ok" } } }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/demo/orders": {
+            "post": {
+                "summary": "Create demo order ID",
+                "description": "Creates a dummy merchant_order_id for quick tests.",
+                "tags": ["Demo"],
+                "responses": {
+                    "200": {
+                        "description": "Created",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": { "merchant_order_id": { "type": "string", "example": "demo-uuid" } }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/payments/paymob/session": {
+            "post": {
+                "summary": "Create payment session",
+                "description": "Creates a payment intention via Paymob Create Intention API. Returns client_secret (payment_key) for the Mobile SDK. When saved_card_uuid is set, send X-User-Id header.",
+                "tags": ["Payments"],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "required": ["merchant_order_id", "amount_cents", "currency", "customer", "billing"],
+                                "properties": {
+                                    "merchant_order_id": { "type": "string" },
+                                    "amount_cents": { "type": "integer", "minimum": 1 },
+                                    "currency": { "type": "string", "example": "EGP" },
+                                    "saved_card_uuid": { "type": "string", "description": "Optional; when set, X-User-Id header is required" },
+                                    "customer": {
+                                        "type": "object",
+                                        "required": ["id", "email", "first_name", "last_name", "phone"],
+                                        "properties": {
+                                            "id": { "type": "string" },
+                                            "email": { "type": "string", "format": "email" },
+                                            "first_name": { "type": "string" },
+                                            "last_name": { "type": "string" },
+                                            "phone": { "type": "string" }
+                                        }
+                                    },
+                                    "billing": {
+                                        "type": "object",
+                                        "required": ["apartment", "floor", "street", "building", "city", "state", "country", "postal_code"],
+                                        "properties": {
+                                            "apartment": { "type": "string" },
+                                            "floor": { "type": "string" },
+                                            "street": { "type": "string" },
+                                            "building": { "type": "string" },
+                                            "city": { "type": "string" },
+                                            "state": { "type": "string" },
+                                            "country": { "type": "string" },
+                                            "postal_code": { "type": "string" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Session created",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "merchant_order_id": { "type": "string" },
+                                        "paymob_order_id": { "type": "integer" },
+                                        "client_secret": { "type": "string" },
+                                        "payment_key": { "type": "string" },
+                                        "status": { "type": "string", "example": "PENDING" },
+                                        "public_key": { "type": "string", "description": "Optional, when set in env" }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "400": { "description": "Validation failed or missing X-User-Id for saved card" },
+                    "404": { "description": "Saved card not found" },
+                    "502": { "description": "Paymob API error" }
+                }
+            }
+        },
+        "/payments/paymob/webhook": {
+            "post": {
+                "summary": "Paymob webhook (Transaction processed callback)",
+                "description": "Server-to-server callback from Paymob. HMAC in query param or header. Set as \"Transaction processed callback\" in Paymob.",
+                "tags": ["Payments"],
+                "responses": {
+                    "200": { "description": "Accepted" },
+                    "400": { "description": "Missing or invalid body" },
+                    "401": { "description": "Missing or invalid HMAC" }
+                }
+            }
+        },
+        "/payments/paymob/callback": {
+            "get": {
+                "summary": "Payment redirect callback (Transaction response callback)",
+                "description": "User redirect after payment. Set as \"Transaction response callback\" in Paymob. Returns HTML; if PAYMENT_CALLBACK_DEEP_LINK is set, redirects back to the app. Query params from Paymob are forwarded to the deep link.",
+                "tags": ["Payments"],
+                "parameters": [
+                    { "name": "merchant_order_id", "in": "query", "schema": { "type": "string" }, "description": "Optional, from Paymob" },
+                    { "name": "success", "in": "query", "schema": { "type": "string" }, "description": "Optional, from Paymob" }
+                ],
+                "responses": {
+                    "200": { "description": "HTML page (redirect or \"Payment complete\")" }
+                }
+            }
+        },
+        "/orders/{merchant_order_id}/payment-status": {
+            "get": {
+                "summary": "Get payment status",
+                "description": "Returns current payment status for an order (no secrets).",
+                "tags": ["Orders"],
+                "parameters": [
+                    { "name": "merchant_order_id", "in": "path", "required": true, "schema": { "type": "string" } }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "status": { "type": "string", "enum": ["PENDING", "PAID", "FAILED"] },
+                                        "amount_cents": { "type": "integer" },
+                                        "currency": { "type": "string" },
+                                        "paymob_order_id": { "type": "integer" },
+                                        "updatedAt": { "type": "string", "format": "date-time" }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "404": { "description": "Order not found" }
+                }
+            }
+        },
+        "/users/me/cards": {
+            "get": {
+                "summary": "List saved cards",
+                "description": "Returns saved cards for the user (no token in list). Requires X-User-Id header.",
+                "tags": ["Saved cards"],
+                "parameters": [
+                    { "name": "X-User-Id", "in": "header", "required": true, "schema": { "type": "string" }, "description": "Opaque user/device id" }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "cards": {
+                                            "type": "array",
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "id": { "type": "string" },
+                                                    "masked_pan": { "type": "string" },
+                                                    "card_brand": { "type": "string" },
+                                                    "last_four": { "type": "string" },
+                                                    "created_at": { "type": "string", "format": "date-time" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": { "description": "Missing or invalid X-User-Id" }
+                }
+            },
+            "post": {
+                "summary": "Save card",
+                "description": "Save a card after successful payment (Paymob token + masked_pan from SDK). Requires X-User-Id header.",
+                "tags": ["Saved cards"],
+                "parameters": [
+                    { "name": "X-User-Id", "in": "header", "required": true, "schema": { "type": "string" } }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "required": ["paymob_token", "masked_pan"],
+                                "properties": {
+                                    "paymob_token": { "type": "string" },
+                                    "masked_pan": { "type": "string" },
+                                    "card_brand": { "type": "string" },
+                                    "last_four": { "type": "string" }
+                                }
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "201": {
+                        "description": "Card saved",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": { "type": "string" },
+                                        "masked_pan": { "type": "string" },
+                                        "card_brand": { "type": "string" },
+                                        "last_four": { "type": "string" },
+                                        "created_at": { "type": "string", "format": "date-time" }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "400": { "description": "Validation failed" },
+                    "401": { "description": "Missing or invalid X-User-Id" }
+                }
+            }
+        },
+        "/users/me/cards/{cardId}": {
+            "get": {
+                "summary": "Get card for payment",
+                "description": "Returns card with paymob_token for use with SDK. Requires X-User-Id header.",
+                "tags": ["Saved cards"],
+                "parameters": [
+                    { "name": "X-User-Id", "in": "header", "required": true, "schema": { "type": "string" } },
+                    { "name": "cardId", "in": "path", "required": true, "schema": { "type": "string" } }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": { "type": "string" },
+                                        "paymob_token": { "type": "string" },
+                                        "masked_pan": { "type": "string" },
+                                        "card_brand": { "type": "string" },
+                                        "last_four": { "type": "string" }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": { "description": "Missing or invalid X-User-Id" },
+                    "404": { "description": "Card not found" }
+                }
+            },
+            "delete": {
+                "summary": "Remove saved card",
+                "tags": ["Saved cards"],
+                "parameters": [
+                    { "name": "X-User-Id", "in": "header", "required": true, "schema": { "type": "string" } },
+                    { "name": "cardId", "in": "path", "required": true, "schema": { "type": "string" } }
+                ],
+                "responses": {
+                    "204": { "description": "Deleted" },
+                    "401": { "description": "Missing or invalid X-User-Id" },
+                    "404": { "description": "Card not found" }
+                }
+            }
+        }
+    }
+}

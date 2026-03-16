@@ -31,6 +31,16 @@ function createSqliteStorage(dbPath) {
     );
     CREATE INDEX IF NOT EXISTS idx_payments_paymob_order_id ON payments (paymob_order_id);
     CREATE INDEX IF NOT EXISTS idx_payments_merchant_order_id ON payments (merchant_order_id);
+    CREATE TABLE IF NOT EXISTS saved_cards (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      paymob_token TEXT NOT NULL,
+      masked_pan TEXT NOT NULL,
+      card_brand TEXT,
+      last_four TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_saved_cards_user_id ON saved_cards (user_id);
   `);
     const rowToRecord = (row) => ({
         id: row.id,
@@ -44,7 +54,16 @@ function createSqliteStorage(dbPath) {
         createdAt: new Date(row.created_at),
         updatedAt: new Date(row.updated_at),
     });
-    return {
+    const rowToSavedCard = (row) => ({
+        id: row.id,
+        user_id: row.user_id,
+        paymob_token: row.paymob_token,
+        masked_pan: row.masked_pan,
+        card_brand: row.card_brand ?? undefined,
+        last_four: row.last_four ?? undefined,
+        created_at: new Date(row.created_at),
+    });
+    const paymentStorage = {
         async create(data) {
             const now = new Date().toISOString();
             const id = crypto.randomUUID();
@@ -69,6 +88,38 @@ function createSqliteStorage(dbPath) {
             const rawJson = rawWebhook !== undefined ? JSON.stringify(rawWebhook) : null;
             db.prepare(`UPDATE payments SET status = ?, raw_webhook = COALESCE(?, raw_webhook), updated_at = ? WHERE merchant_order_id = ?`).run(status, rawJson, updatedAt, merchantOrderId);
         },
+    };
+    const savedCardsStorage = {
+        async createCard(userId, data) {
+            const id = crypto.randomUUID();
+            const now = new Date().toISOString();
+            db.prepare(`INSERT INTO saved_cards (id, user_id, paymob_token, masked_pan, card_brand, last_four, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`).run(id, userId, data.paymob_token, data.masked_pan, data.card_brand ?? null, data.last_four ?? null, now);
+            const row = db.prepare("SELECT * FROM saved_cards WHERE id = ?").get(id);
+            return rowToSavedCard(row);
+        },
+        async listCardsByUserId(userId) {
+            const rows = db.prepare("SELECT id, masked_pan, card_brand, last_four, created_at FROM saved_cards WHERE user_id = ? ORDER BY created_at DESC").all(userId);
+            return rows.map((r) => ({
+                id: r.id,
+                masked_pan: r.masked_pan,
+                card_brand: r.card_brand ?? undefined,
+                last_four: r.last_four ?? undefined,
+                created_at: new Date(r.created_at),
+            }));
+        },
+        async getCardByIdAndUserId(cardId, userId) {
+            const row = db.prepare("SELECT * FROM saved_cards WHERE id = ? AND user_id = ?").get(cardId, userId);
+            return row ? rowToSavedCard(row) : null;
+        },
+        async deleteCardByIdAndUserId(cardId, userId) {
+            const result = db.prepare("DELETE FROM saved_cards WHERE id = ? AND user_id = ?").run(cardId, userId);
+            return result.changes > 0;
+        },
+    };
+    return {
+        ...paymentStorage,
+        savedCards: savedCardsStorage,
     };
 }
 //# sourceMappingURL=sqlite.js.map
