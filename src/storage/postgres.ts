@@ -1,12 +1,13 @@
 import { Pool } from "pg";
 import type { PaymentRecord, PaymentStatus, SavedCard, SavedCardListItem, CreateSavedCardData } from "../types";
-import type { CreatePaymentData, PaymentStorage, SavedCardsStorage } from "./types";
+import type { CreatePaymentData, CreateWebhookEventData, PaymentStorage, SavedCardsStorage, WebhookEventsStorage } from "./types";
 
-export function createPostgresStorage(connectionString: string): PaymentStorage & { savedCards: SavedCardsStorage } {
+export function createPostgresStorage(connectionString: string): PaymentStorage & { savedCards: SavedCardsStorage; webhookEvents: WebhookEventsStorage } {
   const pool = new Pool({ connectionString });
 
   const rowToRecord = (row: {
     id: string;
+    user_id: string | null;
     merchant_order_id: string;
     paymob_order_id: string;
     amount_cents: number;
@@ -18,6 +19,7 @@ export function createPostgresStorage(connectionString: string): PaymentStorage 
     updated_at: Date;
   }): PaymentRecord => ({
     id: row.id,
+    ...(row.user_id != null && { user_id: row.user_id }),
     merchant_order_id: row.merchant_order_id,
     paymob_order_id: Number(row.paymob_order_id),
     amount_cents: row.amount_cents,
@@ -54,10 +56,11 @@ export function createPostgresStorage(connectionString: string): PaymentStorage 
       const now = new Date();
       const result = await pool.query(
         `INSERT INTO payments (
-          merchant_order_id, paymob_order_id, amount_cents, currency, status, payment_key, created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-        RETURNING id, merchant_order_id, paymob_order_id, amount_cents, currency, status, payment_key, raw_webhook, created_at, updated_at`,
+          user_id, merchant_order_id, paymob_order_id, amount_cents, currency, status, payment_key, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        RETURNING id, user_id, merchant_order_id, paymob_order_id, amount_cents, currency, status, payment_key, raw_webhook, created_at, updated_at`,
         [
+          data.user_id ?? null,
           data.merchant_order_id,
           data.paymob_order_id,
           data.amount_cents,
@@ -73,7 +76,7 @@ export function createPostgresStorage(connectionString: string): PaymentStorage 
 
     async findByMerchantOrderId(merchantOrderId: string): Promise<PaymentRecord | null> {
       const result = await pool.query(
-        `SELECT id, merchant_order_id, paymob_order_id, amount_cents, currency, status, payment_key, raw_webhook, created_at, updated_at
+        `SELECT id, user_id, merchant_order_id, paymob_order_id, amount_cents, currency, status, payment_key, raw_webhook, created_at, updated_at
          FROM payments WHERE merchant_order_id = $1`,
         [merchantOrderId]
       );
@@ -83,7 +86,7 @@ export function createPostgresStorage(connectionString: string): PaymentStorage 
 
     async findByPaymobOrderId(paymobOrderId: number): Promise<PaymentRecord | null> {
       const result = await pool.query(
-        `SELECT id, merchant_order_id, paymob_order_id, amount_cents, currency, status, payment_key, raw_webhook, created_at, updated_at
+        `SELECT id, user_id, merchant_order_id, paymob_order_id, amount_cents, currency, status, payment_key, raw_webhook, created_at, updated_at
          FROM payments WHERE paymob_order_id = $1`,
         [paymobOrderId]
       );
@@ -112,6 +115,49 @@ export function createPostgresStorage(connectionString: string): PaymentStorage 
     },
   };
 
+  const webhookEvents: WebhookEventsStorage = {
+    async addEvent(data: CreateWebhookEventData): Promise<void> {
+      await pool.query(
+        `INSERT INTO payment_webhook_events (merchant_order_id, paymob_order_id, event_type, headers, raw_body, received_at)
+         VALUES ($1, $2, $3, $4::jsonb, $5, NOW())`,
+        [
+          data.merchant_order_id ?? null,
+          data.paymob_order_id ?? null,
+          data.event_type ?? null,
+          data.headers ? JSON.stringify(data.headers) : null,
+          data.raw_body,
+        ]
+      );
+    },
+
+    async listEventsByMerchantOrderId(merchantOrderId: string) {
+      const result = await pool.query(
+        `SELECT id, merchant_order_id, paymob_order_id, event_type, headers, raw_body, received_at
+         FROM payment_webhook_events
+         WHERE merchant_order_id = $1
+         ORDER BY received_at DESC`,
+        [merchantOrderId]
+      );
+      return (result.rows as Array<{
+        id: string;
+        merchant_order_id: string | null;
+        paymob_order_id: string | null;
+        event_type: string | null;
+        headers: Record<string, string | string[] | undefined> | null;
+        raw_body: string;
+        received_at: Date;
+      }>).map((r) => ({
+        id: r.id,
+        ...(r.merchant_order_id != null && { merchant_order_id: r.merchant_order_id }),
+        ...(r.paymob_order_id != null && { paymob_order_id: Number(r.paymob_order_id) }),
+        ...(r.event_type != null && { event_type: r.event_type }),
+        headers: r.headers ?? undefined,
+        raw_body: r.raw_body,
+        received_at: r.received_at,
+      }));
+    },
+  };
+
   const savedCardsStorage: SavedCardsStorage = {
     async createCard(userId: string, data: CreateSavedCardData): Promise<SavedCard> {
       const result = await pool.query(
@@ -120,6 +166,16 @@ export function createPostgresStorage(connectionString: string): PaymentStorage 
          RETURNING id, user_id, paymob_token, masked_pan, card_brand, last_four, created_at`,
         [userId, data.paymob_token, data.masked_pan, data.card_brand ?? null, data.last_four ?? null]
       );
+      return rowToSavedCard(result.rows[0] as SavedCardRow);
+    },
+
+    async getCardByToken(userId: string, paymobToken: string): Promise<SavedCard | null> {
+      const result = await pool.query(
+        `SELECT id, user_id, paymob_token, masked_pan, card_brand, last_four, created_at
+         FROM saved_cards WHERE user_id = $1 AND paymob_token = $2`,
+        [userId, paymobToken]
+      );
+      if (result.rows.length === 0) return null;
       return rowToSavedCard(result.rows[0] as SavedCardRow);
     },
 
@@ -158,5 +214,6 @@ export function createPostgresStorage(connectionString: string): PaymentStorage 
   return {
     ...paymentStorage,
     savedCards: savedCardsStorage,
+    webhookEvents,
   };
 }

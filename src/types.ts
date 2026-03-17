@@ -44,6 +44,8 @@ export type PaymentStatus = "PENDING" | "PAID" | "FAILED";
 
 export interface PaymentRecord {
   id?: string;
+  /** Optional: app user/device id used to attach saved cards from webhooks. */
+  user_id?: string;
   merchant_order_id: string;
   paymob_order_id: number;
   amount_cents: number;

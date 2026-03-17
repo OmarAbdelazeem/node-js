@@ -150,6 +150,10 @@ Server-to-server callback from Paymob. Verifies HMAC (query `hmac` or header `hm
 
 User redirect after payment. Paymob (or the SDK) redirects the user here with GET. Set this URL as **Transaction response callback** in Paymob. Returns an HTML page; if `PAYMENT_CALLBACK_DEEP_LINK` is set in `.env` (e.g. `myapp://payment/complete`), the page redirects back to the app and forwards query params (e.g. `merchant_order_id`, `success`) so the app can show the result or poll payment status.
 
+### GET /debug/paymob/webhook-events/:merchant_order_id (dev-only)
+
+Lists **all** captured webhook/callback payloads for an order to help debug saved-cards tokenization. Disabled in production.
+
 ### GET /orders/:merchant_order_id/payment-status
 
 Returns the current payment status for an order (no secrets).

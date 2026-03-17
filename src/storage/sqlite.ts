@@ -2,10 +2,11 @@ import Database from "better-sqlite3";
 import { existsSync, mkdirSync } from "fs";
 import { dirname } from "path";
 import type { PaymentRecord, PaymentStatus, SavedCard, SavedCardListItem, CreateSavedCardData } from "../types";
-import type { CreatePaymentData, PaymentStorage, SavedCardsStorage } from "./types";
+import type { CreatePaymentData, CreateWebhookEventData, PaymentStorage, SavedCardsStorage, WebhookEventsStorage } from "./types";
 
 type SqliteRow = {
   id: string;
+  user_id: string | null;
   merchant_order_id: string;
   paymob_order_id: number;
   amount_cents: number;
@@ -27,6 +28,16 @@ type SavedCardRow = {
   created_at: string;
 };
 
+type WebhookEventRow = {
+  id: string;
+  merchant_order_id: string | null;
+  paymob_order_id: number | null;
+  event_type: string | null;
+  headers: string | null;
+  raw_body: string;
+  received_at: string;
+};
+
 function ensureDirForFile(filePath: string): void {
   const dir = dirname(filePath);
   if (!existsSync(dir)) {
@@ -34,13 +45,14 @@ function ensureDirForFile(filePath: string): void {
   }
 }
 
-export function createSqliteStorage(dbPath: string): PaymentStorage & { savedCards: SavedCardsStorage } {
+export function createSqliteStorage(dbPath: string): PaymentStorage & { savedCards: SavedCardsStorage; webhookEvents: WebhookEventsStorage } {
   ensureDirForFile(dbPath);
   const db = new Database(dbPath);
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS payments (
       id TEXT PRIMARY KEY,
+      user_id TEXT,
       merchant_order_id TEXT NOT NULL UNIQUE,
       paymob_order_id INTEGER NOT NULL,
       amount_cents INTEGER NOT NULL,
@@ -53,6 +65,17 @@ export function createSqliteStorage(dbPath: string): PaymentStorage & { savedCar
     );
     CREATE INDEX IF NOT EXISTS idx_payments_paymob_order_id ON payments (paymob_order_id);
     CREATE INDEX IF NOT EXISTS idx_payments_merchant_order_id ON payments (merchant_order_id);
+    CREATE TABLE IF NOT EXISTS payment_webhook_events (
+      id TEXT PRIMARY KEY,
+      merchant_order_id TEXT,
+      paymob_order_id INTEGER,
+      event_type TEXT,
+      headers TEXT,
+      raw_body TEXT NOT NULL,
+      received_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_webhook_events_merchant_order_id ON payment_webhook_events (merchant_order_id);
+    CREATE INDEX IF NOT EXISTS idx_webhook_events_paymob_order_id ON payment_webhook_events (paymob_order_id);
     CREATE TABLE IF NOT EXISTS saved_cards (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL,
@@ -63,10 +86,18 @@ export function createSqliteStorage(dbPath: string): PaymentStorage & { savedCar
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_saved_cards_user_id ON saved_cards (user_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_saved_cards_user_token ON saved_cards (user_id, paymob_token);
   `);
+
+  // Migrate existing DB files (older schema) to include payments.user_id
+  const paymentCols = db.pragma("table_info(payments)") as Array<{ name: string }>;
+  if (!paymentCols.some((c) => c.name === "user_id")) {
+    db.exec(`ALTER TABLE payments ADD COLUMN user_id TEXT;`);
+  }
 
   const rowToRecord = (row: SqliteRow): PaymentRecord => ({
     id: row.id,
+    ...(row.user_id != null && { user_id: row.user_id }),
     merchant_order_id: row.merchant_order_id,
     paymob_order_id: row.paymob_order_id,
     amount_cents: row.amount_cents,
@@ -88,15 +119,34 @@ export function createSqliteStorage(dbPath: string): PaymentStorage & { savedCar
     created_at: new Date(row.created_at),
   });
 
+  const rowToWebhookEvent = (row: WebhookEventRow): {
+    id: string;
+    merchant_order_id?: string;
+    paymob_order_id?: number;
+    event_type?: string;
+    headers?: Record<string, string | string[] | undefined>;
+    raw_body: string;
+    received_at: Date;
+  } => ({
+    id: row.id,
+    ...(row.merchant_order_id != null && { merchant_order_id: row.merchant_order_id }),
+    ...(row.paymob_order_id != null && { paymob_order_id: row.paymob_order_id }),
+    ...(row.event_type != null && { event_type: row.event_type }),
+    headers: row.headers != null ? (JSON.parse(row.headers) as Record<string, string | string[] | undefined>) : undefined,
+    raw_body: row.raw_body,
+    received_at: new Date(row.received_at),
+  });
+
   const paymentStorage: PaymentStorage = {
     async create(data: CreatePaymentData): Promise<PaymentRecord> {
       const now = new Date().toISOString();
       const id = crypto.randomUUID();
       db.prepare(
-        `INSERT INTO payments (id, merchant_order_id, paymob_order_id, amount_cents, currency, status, payment_key, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO payments (id, user_id, merchant_order_id, paymob_order_id, amount_cents, currency, status, payment_key, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(
         id,
+        data.user_id ?? null,
         data.merchant_order_id,
         data.paymob_order_id,
         data.amount_cents,
@@ -135,6 +185,35 @@ export function createSqliteStorage(dbPath: string): PaymentStorage & { savedCar
     },
   };
 
+  const webhookEvents: WebhookEventsStorage = {
+    async addEvent(data: CreateWebhookEventData): Promise<void> {
+      const id = crypto.randomUUID();
+      const now = new Date().toISOString();
+      db.prepare(
+        `INSERT INTO payment_webhook_events (id, merchant_order_id, paymob_order_id, event_type, headers, raw_body, received_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        id,
+        data.merchant_order_id ?? null,
+        data.paymob_order_id ?? null,
+        data.event_type ?? null,
+        data.headers ? JSON.stringify(data.headers) : null,
+        data.raw_body,
+        now
+      );
+    },
+
+    async listEventsByMerchantOrderId(merchantOrderId: string) {
+      const rows = db.prepare(
+        `SELECT id, merchant_order_id, paymob_order_id, event_type, headers, raw_body, received_at
+         FROM payment_webhook_events
+         WHERE merchant_order_id = ?
+         ORDER BY received_at DESC`
+      ).all(merchantOrderId) as WebhookEventRow[];
+      return rows.map(rowToWebhookEvent);
+    },
+  };
+
   const savedCardsStorage: SavedCardsStorage = {
     async createCard(userId: string, data: CreateSavedCardData): Promise<SavedCard> {
       const id = crypto.randomUUID();
@@ -153,6 +232,11 @@ export function createSqliteStorage(dbPath: string): PaymentStorage & { savedCar
       );
       const row = db.prepare("SELECT * FROM saved_cards WHERE id = ?").get(id) as SavedCardRow;
       return rowToSavedCard(row);
+    },
+
+    async getCardByToken(userId: string, paymobToken: string): Promise<SavedCard | null> {
+      const row = db.prepare("SELECT * FROM saved_cards WHERE user_id = ? AND paymob_token = ?").get(userId, paymobToken) as SavedCardRow | undefined;
+      return row ? rowToSavedCard(row) : null;
     },
 
     async listCardsByUserId(userId: string): Promise<SavedCardListItem[]> {
@@ -182,5 +266,6 @@ export function createSqliteStorage(dbPath: string): PaymentStorage & { savedCar
   return {
     ...paymentStorage,
     savedCards: savedCardsStorage,
+    webhookEvents,
   };
 }

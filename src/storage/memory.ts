@@ -1,5 +1,5 @@
 import type { PaymentRecord, PaymentStatus, SavedCard, SavedCardListItem, CreateSavedCardData } from "../types";
-import type { CreatePaymentData, PaymentStorage, SavedCardsStorage } from "./types";
+import type { CreatePaymentData, CreateWebhookEventData, PaymentStorage, SavedCardsStorage, WebhookEventsStorage } from "./types";
 
 const byMerchantOrderId = new Map<string, PaymentRecord>();
 const byPaymobOrderId = new Map<number, PaymentRecord>();
@@ -65,6 +65,13 @@ const savedCardsStorage: SavedCardsStorage = {
     return card;
   },
 
+  async getCardByToken(userId: string, paymobToken: string): Promise<SavedCard | null> {
+    for (const card of byCardId.values()) {
+      if (card.user_id === userId && card.paymob_token === paymobToken) return card;
+    }
+    return null;
+  },
+
   async listCardsByUserId(userId: string): Promise<SavedCardListItem[]> {
     const list: SavedCardListItem[] = [];
     for (const card of byCardId.values()) {
@@ -94,7 +101,38 @@ const savedCardsStorage: SavedCardsStorage = {
   },
 };
 
-export const memoryStorage: PaymentStorage & { savedCards: SavedCardsStorage } = {
+type WebhookEventRecord = {
+  id: string;
+  merchant_order_id?: string;
+  paymob_order_id?: number;
+  event_type?: string;
+  headers?: Record<string, string | string[] | undefined>;
+  raw_body: string;
+  received_at: Date;
+};
+
+const webhookEvents: WebhookEventsStorage = {
+  async addEvent(data: CreateWebhookEventData): Promise<void> {
+    events.unshift({
+      id: crypto.randomUUID(),
+      merchant_order_id: data.merchant_order_id,
+      paymob_order_id: data.paymob_order_id,
+      event_type: data.event_type,
+      headers: data.headers,
+      raw_body: data.raw_body,
+      received_at: new Date(),
+    });
+  },
+
+  async listEventsByMerchantOrderId(merchantOrderId: string): Promise<WebhookEventRecord[]> {
+    return events.filter((e) => e.merchant_order_id === merchantOrderId);
+  },
+};
+
+const events: WebhookEventRecord[] = [];
+
+export const memoryStorage: PaymentStorage & { savedCards: SavedCardsStorage; webhookEvents: WebhookEventsStorage } = {
   ...paymentStorage,
   savedCards: savedCardsStorage,
+  webhookEvents,
 };

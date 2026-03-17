@@ -19,6 +19,7 @@ function createSqliteStorage(dbPath) {
     db.exec(`
     CREATE TABLE IF NOT EXISTS payments (
       id TEXT PRIMARY KEY,
+      user_id TEXT,
       merchant_order_id TEXT NOT NULL UNIQUE,
       paymob_order_id INTEGER NOT NULL,
       amount_cents INTEGER NOT NULL,
@@ -31,6 +32,17 @@ function createSqliteStorage(dbPath) {
     );
     CREATE INDEX IF NOT EXISTS idx_payments_paymob_order_id ON payments (paymob_order_id);
     CREATE INDEX IF NOT EXISTS idx_payments_merchant_order_id ON payments (merchant_order_id);
+    CREATE TABLE IF NOT EXISTS payment_webhook_events (
+      id TEXT PRIMARY KEY,
+      merchant_order_id TEXT,
+      paymob_order_id INTEGER,
+      event_type TEXT,
+      headers TEXT,
+      raw_body TEXT NOT NULL,
+      received_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_webhook_events_merchant_order_id ON payment_webhook_events (merchant_order_id);
+    CREATE INDEX IF NOT EXISTS idx_webhook_events_paymob_order_id ON payment_webhook_events (paymob_order_id);
     CREATE TABLE IF NOT EXISTS saved_cards (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL,
@@ -41,9 +53,16 @@ function createSqliteStorage(dbPath) {
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_saved_cards_user_id ON saved_cards (user_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_saved_cards_user_token ON saved_cards (user_id, paymob_token);
   `);
+    // Migrate existing DB files (older schema) to include payments.user_id
+    const paymentCols = db.pragma("table_info(payments)");
+    if (!paymentCols.some((c) => c.name === "user_id")) {
+        db.exec(`ALTER TABLE payments ADD COLUMN user_id TEXT;`);
+    }
     const rowToRecord = (row) => ({
         id: row.id,
+        ...(row.user_id != null && { user_id: row.user_id }),
         merchant_order_id: row.merchant_order_id,
         paymob_order_id: row.paymob_order_id,
         amount_cents: row.amount_cents,
@@ -63,12 +82,21 @@ function createSqliteStorage(dbPath) {
         last_four: row.last_four ?? undefined,
         created_at: new Date(row.created_at),
     });
+    const rowToWebhookEvent = (row) => ({
+        id: row.id,
+        ...(row.merchant_order_id != null && { merchant_order_id: row.merchant_order_id }),
+        ...(row.paymob_order_id != null && { paymob_order_id: row.paymob_order_id }),
+        ...(row.event_type != null && { event_type: row.event_type }),
+        headers: row.headers != null ? JSON.parse(row.headers) : undefined,
+        raw_body: row.raw_body,
+        received_at: new Date(row.received_at),
+    });
     const paymentStorage = {
         async create(data) {
             const now = new Date().toISOString();
             const id = crypto.randomUUID();
-            db.prepare(`INSERT INTO payments (id, merchant_order_id, paymob_order_id, amount_cents, currency, status, payment_key, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, data.merchant_order_id, data.paymob_order_id, data.amount_cents, data.currency, data.status, data.payment_key ?? null, now, now);
+            db.prepare(`INSERT INTO payments (id, user_id, merchant_order_id, paymob_order_id, amount_cents, currency, status, payment_key, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, data.user_id ?? null, data.merchant_order_id, data.paymob_order_id, data.amount_cents, data.currency, data.status, data.payment_key ?? null, now, now);
             const row = db.prepare("SELECT * FROM payments WHERE id = ?").get(id);
             return rowToRecord(row);
         },
@@ -89,6 +117,21 @@ function createSqliteStorage(dbPath) {
             db.prepare(`UPDATE payments SET status = ?, raw_webhook = COALESCE(?, raw_webhook), updated_at = ? WHERE merchant_order_id = ?`).run(status, rawJson, updatedAt, merchantOrderId);
         },
     };
+    const webhookEvents = {
+        async addEvent(data) {
+            const id = crypto.randomUUID();
+            const now = new Date().toISOString();
+            db.prepare(`INSERT INTO payment_webhook_events (id, merchant_order_id, paymob_order_id, event_type, headers, raw_body, received_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`).run(id, data.merchant_order_id ?? null, data.paymob_order_id ?? null, data.event_type ?? null, data.headers ? JSON.stringify(data.headers) : null, data.raw_body, now);
+        },
+        async listEventsByMerchantOrderId(merchantOrderId) {
+            const rows = db.prepare(`SELECT id, merchant_order_id, paymob_order_id, event_type, headers, raw_body, received_at
+         FROM payment_webhook_events
+         WHERE merchant_order_id = ?
+         ORDER BY received_at DESC`).all(merchantOrderId);
+            return rows.map(rowToWebhookEvent);
+        },
+    };
     const savedCardsStorage = {
         async createCard(userId, data) {
             const id = crypto.randomUUID();
@@ -97,6 +140,10 @@ function createSqliteStorage(dbPath) {
          VALUES (?, ?, ?, ?, ?, ?, ?)`).run(id, userId, data.paymob_token, data.masked_pan, data.card_brand ?? null, data.last_four ?? null, now);
             const row = db.prepare("SELECT * FROM saved_cards WHERE id = ?").get(id);
             return rowToSavedCard(row);
+        },
+        async getCardByToken(userId, paymobToken) {
+            const row = db.prepare("SELECT * FROM saved_cards WHERE user_id = ? AND paymob_token = ?").get(userId, paymobToken);
+            return row ? rowToSavedCard(row) : null;
         },
         async listCardsByUserId(userId) {
             const rows = db.prepare("SELECT id, masked_pan, card_brand, last_four, created_at FROM saved_cards WHERE user_id = ? ORDER BY created_at DESC").all(userId);
@@ -120,6 +167,7 @@ function createSqliteStorage(dbPath) {
     return {
         ...paymentStorage,
         savedCards: savedCardsStorage,
+        webhookEvents,
     };
 }
 //# sourceMappingURL=sqlite.js.map

@@ -10,6 +10,28 @@ import type { PaymobWebhookPayload } from "../types";
 const router = Router();
 const storage = getStorage();
 
+function findTokenishKeys(value: unknown): string[] {
+  const matches: string[] = [];
+  const visit = (v: unknown, path: string) => {
+    if (v == null) return;
+    if (Array.isArray(v)) {
+      v.forEach((item, idx) => visit(item, `${path}[${idx}]`));
+      return;
+    }
+    if (typeof v === "object") {
+      for (const [k, child] of Object.entries(v as Record<string, unknown>)) {
+        const p = path ? `${path}.${k}` : k;
+        if (/(^|_)(token|card_token|cardToken|card_tokens|saved)(_|\b)/i.test(k)) {
+          matches.push(p);
+        }
+        visit(child, p);
+      }
+    }
+  };
+  visit(value, "");
+  return Array.from(new Set(matches));
+}
+
 /**
  * POST /payments/paymob/session
  * Body: SessionRequest (merchant_order_id, amount_cents, currency, customer, billing, optional saved_card_uuid).
@@ -25,11 +47,11 @@ router.post("/payments/paymob/session", async (req: Request, res: Response) => {
     });
   }
   const input = parsed.data;
+  const rawUserId = req.headers["x-user-id"];
+  const userId = typeof rawUserId === "string" ? rawUserId.trim() : "";
 
   let cardTokens: string[] = [];
   if (input.saved_card_uuid && input.saved_card_uuid.trim()) {
-    const rawUserId = req.headers["x-user-id"];
-    const userId = typeof rawUserId === "string" ? rawUserId.trim() : "";
     if (!userId) {
       return res.status(400).json({
         error: "X-User-Id header is required when paying with a saved card (saved_card_uuid)",
@@ -56,6 +78,7 @@ router.post("/payments/paymob/session", async (req: Request, res: Response) => {
       notificationUrl,
     });
     await storage.create({
+      user_id: userId || undefined,
       merchant_order_id: input.merchant_order_id,
       paymob_order_id: orderId,
       amount_cents: input.amount_cents,
@@ -103,6 +126,29 @@ export function webhookHandler(req: Request, res: Response): void {
     return;
   }
 
+  // Capture every callback payload for debugging saved-card token delivery.
+  // We store raw_body + headers, and best-effort extract identifiers.
+  const eventType =
+    typeof (payload as Record<string, unknown>)?.type === "string"
+      ? ((payload as Record<string, unknown>).type as string)
+      : undefined;
+  const paymobOrderIdForEvent = resolvePaymobOrderId(payload) ?? undefined;
+  const merchantOrderIdForEvent = resolveMerchantOrderId(payload) ?? undefined;
+  storage.webhookEvents
+    .addEvent({
+      merchant_order_id: merchantOrderIdForEvent,
+      paymob_order_id: paymobOrderIdForEvent,
+      event_type: eventType,
+      headers: req.headers as Record<string, string | string[] | undefined>,
+      raw_body: payloadStr,
+    })
+    .catch((e) => console.warn("[webhook] failed to persist webhook event:", e instanceof Error ? e.message : e));
+
+  const tokenish = findTokenishKeys(payload);
+  if (tokenish.length) {
+    console.log("[webhook] token-like keys found:", tokenish);
+  }
+
   const queryHmac = typeof req.query.hmac === "string" ? req.query.hmac : undefined;
   const headerHmac = typeof req.headers.hmac === "string" ? req.headers.hmac : undefined;
   const signature = queryHmac ?? headerHmac;
@@ -133,13 +179,52 @@ export function webhookHandler(req: Request, res: Response): void {
   const merchantOrderId = resolveMerchantOrderId(payload);
 
   (async () => {
+    // Saved cards tokenization: Paymob sends a separate TOKEN event.
+    const type = typeof (payload as Record<string, unknown>)?.type === "string"
+      ? ((payload as Record<string, unknown>).type as string)
+      : undefined;
+    if (type === "TOKEN") {
+      const obj = (payload as Record<string, unknown>).obj as Record<string, unknown> | undefined;
+      const token = typeof obj?.token === "string" ? obj.token : "";
+      const maskedPan = typeof obj?.masked_pan === "string" ? obj.masked_pan : "";
+      const cardSubtype = typeof obj?.card_subtype === "string" ? obj.card_subtype : undefined;
+      const orderIdRaw = obj?.order_id;
+      const orderId = typeof orderIdRaw === "number"
+        ? orderIdRaw
+        : typeof orderIdRaw === "string"
+          ? parseInt(orderIdRaw, 10)
+          : NaN;
+
+      if (token && maskedPan && Number.isFinite(orderId)) {
+        const record = await storage.findByPaymobOrderId(orderId);
+        const recordUserId = record?.user_id;
+        if (recordUserId) {
+          const existing = await storage.savedCards.getCardByToken(recordUserId, token);
+          if (!existing) {
+            const lastFourMatch = maskedPan.match(/(\d{4})\s*$/);
+            await storage.savedCards.createCard(recordUserId, {
+              paymob_token: token,
+              masked_pan: maskedPan,
+              card_brand: cardSubtype,
+              last_four: lastFourMatch ? lastFourMatch[1] : undefined,
+            });
+            console.log("[saved-cards] token saved", { user_id: recordUserId, paymob_order_id: orderId });
+          } else {
+            console.log("[saved-cards] token already saved", { user_id: recordUserId, paymob_order_id: orderId });
+          }
+        } else {
+          console.warn("[saved-cards] TOKEN webhook received but no user_id mapped for order", { paymob_order_id: orderId });
+        }
+      } else {
+        console.warn("[saved-cards] TOKEN webhook missing required fields", { hasToken: !!token, hasMaskedPan: !!maskedPan, orderId: orderIdRaw });
+      }
+      res.status(200).send();
+      return;
+    }
+
     let record = null;
-    if (paymobOrderId != null) {
-      record = await storage.findByPaymobOrderId(paymobOrderId);
-    }
-    if (!record && merchantOrderId) {
-      record = await storage.findByMerchantOrderId(merchantOrderId);
-    }
+    if (paymobOrderId != null) record = await storage.findByPaymobOrderId(paymobOrderId);
+    if (!record && merchantOrderId) record = await storage.findByMerchantOrderId(merchantOrderId);
     if (!record) {
       res.status(200).send();
       return;
@@ -282,6 +367,19 @@ router.post("/demo/orders", (_req: Request, res: Response) => {
  */
 router.get("/health", (_req: Request, res: Response) => {
   return res.status(200).json({ status: "ok" });
+});
+
+/**
+ * GET /debug/paymob/webhook-events/:merchant_order_id
+ * Dev-only helper: list all captured webhook events for a given order id.
+ */
+router.get("/debug/paymob/webhook-events/:merchant_order_id", async (req: Request, res: Response) => {
+  if (process.env.NODE_ENV === "production") {
+    return res.status(404).json({ error: "Not found" });
+  }
+  const { merchant_order_id } = req.params;
+  const events = await storage.webhookEvents.listEventsByMerchantOrderId(merchant_order_id);
+  return res.status(200).json({ merchant_order_id, count: events.length, events });
 });
 
 export default router;

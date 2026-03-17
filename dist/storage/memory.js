@@ -56,6 +56,13 @@ const savedCardsStorage = {
         byCardId.set(id, card);
         return card;
     },
+    async getCardByToken(userId, paymobToken) {
+        for (const card of byCardId.values()) {
+            if (card.user_id === userId && card.paymob_token === paymobToken)
+                return card;
+        }
+        return null;
+    },
     async listCardsByUserId(userId) {
         const list = [];
         for (const card of byCardId.values()) {
@@ -85,8 +92,26 @@ const savedCardsStorage = {
         return true;
     },
 };
+const webhookEvents = {
+    async addEvent(data) {
+        events.unshift({
+            id: crypto.randomUUID(),
+            merchant_order_id: data.merchant_order_id,
+            paymob_order_id: data.paymob_order_id,
+            event_type: data.event_type,
+            headers: data.headers,
+            raw_body: data.raw_body,
+            received_at: new Date(),
+        });
+    },
+    async listEventsByMerchantOrderId(merchantOrderId) {
+        return events.filter((e) => e.merchant_order_id === merchantOrderId);
+    },
+};
+const events = [];
 exports.memoryStorage = {
     ...paymentStorage,
     savedCards: savedCardsStorage,
+    webhookEvents,
 };
 //# sourceMappingURL=memory.js.map

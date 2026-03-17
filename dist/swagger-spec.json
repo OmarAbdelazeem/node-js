@@ -48,8 +48,11 @@
         "/payments/paymob/session": {
             "post": {
                 "summary": "Create payment session",
-                "description": "Creates a payment intention via Paymob Create Intention API. Returns client_secret (payment_key) for the Mobile SDK. When saved_card_uuid is set, send X-User-Id header.",
+                "description": "Creates a payment intention via Paymob Create Intention API. Returns client_secret (payment_key) for the Mobile SDK. For saved cards tokenization, send X-User-Id so the backend can attach the TOKEN callback to the right user. When saved_card_uuid is set, X-User-Id is required.",
                 "tags": ["Payments"],
+                "parameters": [
+                    { "name": "X-User-Id", "in": "header", "required": false, "schema": { "type": "string" }, "description": "Recommended for saved cards: opaque user/device id to attach TOKEN callbacks" }
+                ],
                 "requestBody": {
                     "required": true,
                     "content": {
@@ -140,6 +143,20 @@
                 ],
                 "responses": {
                     "200": { "description": "HTML page (redirect or \"Payment complete\")" }
+                }
+            }
+        },
+        "/debug/paymob/webhook-events/{merchant_order_id}": {
+            "get": {
+                "summary": "List captured webhook events (dev-only)",
+                "description": "Returns all webhook/callback payloads we captured for a given merchant_order_id. Disabled in production (404). Useful for finding saved-card token fields.",
+                "tags": ["Debug"],
+                "parameters": [
+                    { "name": "merchant_order_id", "in": "path", "required": true, "schema": { "type": "string" } }
+                ],
+                "responses": {
+                    "200": { "description": "OK" },
+                    "404": { "description": "Not found (production)" }
                 }
             }
         },
